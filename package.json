@@ -1,0 +1,9 @@
+{
+  "name": "secret-venue-whatsapp-demo",
+  "version": "1.0.0",
+  "description": "Demo WhatsApp AI assistant for The Secret Venue - built on Queueapp's Meta test app for demo purposes",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  }
+}
