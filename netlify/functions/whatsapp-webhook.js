@@ -43,18 +43,25 @@ exports.handler = async (event) => {
 
       const { from, text } = message;
 
-      // --- 3. Ask Claude to extract intent + date range ---
-      const intent = await parseIntent(text);
-
-      // --- 4. Act on intent ---
       let replyText;
-      if (intent.intent === "get_events" && intent.start_date) {
-        const events = await getCalendarEvents(intent.start_date, intent.end_date || intent.start_date);
-        replyText = formatAvailabilityReply(intent.start_date, intent.end_date, events);
-      } else if (intent.intent === "faq") {
-        replyText = await answerFaq(text);
-      } else {
-        replyText = "Hi! I can check availability for a date, or answer questions about The Secret Venue. Could you share the date you're asking about?";
+      try {
+        // --- 3. Ask Claude to extract intent + date range ---
+        const intent = await parseIntent(text);
+
+        // --- 4. Act on intent ---
+        if (intent.intent === "get_events" && intent.start_date) {
+          const events = await getCalendarEvents(intent.start_date, intent.end_date || intent.start_date);
+          replyText = formatAvailabilityReply(intent.start_date, intent.end_date, events);
+        } else if (intent.intent === "faq") {
+          replyText = await answerFaq(text);
+        } else {
+          replyText = "Hi! I can check availability for a date, or answer questions about The Secret Venue. Could you share the date you're asking about?";
+        }
+      } catch (innerErr) {
+        // Calendar/Claude failed (e.g. missing Google refresh token, expired API key).
+        // Log the real reason, but still send the customer SOMETHING instead of silence.
+        console.error("Intent/calendar step failed:", innerErr);
+        replyText = "Thanks for reaching out! I'm having a little trouble checking that right now — the owner will follow up with you shortly.";
       }
 
       // --- 5. Send reply back via WhatsApp ---
@@ -222,7 +229,7 @@ function formatTime(dateObj) {
 async function sendWhatsAppMessage(to, text) {
   const url = `https://graph.facebook.com/v19.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
 
-  await fetch(url, {
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -235,4 +242,16 @@ async function sendWhatsAppMessage(to, text) {
       text: { body: text },
     }),
   });
+
+  const result = await response.json();
+
+  if (!response.ok) {
+    // This is the critical bit that was missing: log Meta's actual error
+    // (e.g. expired token, invalid recipient) instead of failing silently.
+    console.error("WhatsApp send failed:", response.status, JSON.stringify(result));
+  } else {
+    console.log("WhatsApp send succeeded:", JSON.stringify(result));
+  }
+
+  return result;
 }
