@@ -23,6 +23,8 @@
 
 // ---------- Static content (edit these for the venue) ----------
 
+const SITE_URL = "https://demosecretvenue1.netlify.app";
+
 const MENU_TEXT = `Hi! Welcome to The Secret Venue 👋
 
 Reply with a number:
@@ -41,7 +43,9 @@ const HANDOFF_TEXT = `Thanks! The owner will reach out to you shortly on this nu
 
 const PACKAGE_ASK_NAME_TEXT = `Great question! Our packages vary based on your event — could you share your name so our representative can call you with details?`;
 
-const PACKAGE_CONFIRM_TEXT = `Thanks! Our representative will call you shortly to go over packages and pricing for your event.`;
+const PACKAGE_CONFIRM_TEXT = `You can browse our packages here: ${SITE_URL}/#packages
+
+Our representative will also call you shortly to help you pick the right one and answer any questions.`;
 
 // Keywords that trigger the FAQ reply directly, without needing menu option "2"
 const FAQ_KEYWORDS = ["price", "pricing", "cost", "capacity", "parking", "address", "location", "deposit"];
@@ -87,22 +91,25 @@ exports.handler = async (event) => {
     const trimmed = text.trim();
     const lower = trimmed.toLowerCase();
 
-    let replyText;
     try {
       // ===== LAYER 1: rule-based, no AI =====
 
       if (["hi", "hello", "hey", "menu", "start"].includes(lower)) {
-        replyText = MENU_TEXT;
-      } else if (trimmed === "1") {
+        await sendMenuButtons(from);
+        return { statusCode: 200, body: "ok" };
+      }
+
+      let replyText;
+      if (trimmed === "1" || trimmed === "opt_availability") {
         replyText = "Sure — which date would you like to check? (e.g. 15/08/2026 or Aug 15)";
-      } else if (trimmed === "2" || FAQ_KEYWORDS.some((k) => lower.includes(k))) {
+      } else if (trimmed === "2" || trimmed === "opt_pricing" || FAQ_KEYWORDS.some((k) => lower.includes(k))) {
         replyText = FAQ_TEXT;
       } else if (PACKAGE_KEYWORDS.some((k) => lower.includes(k))) {
         // Package/pricing/negotiation questions always hand off to a human call,
         // whether or not package data is configured for this client yet.
         replyText = PACKAGE_CONFIRM_TEXT;
         await notifyOwner(from, text, "Package/pricing enquiry");
-      } else if (trimmed === "3" || HANDOFF_KEYWORDS.some((k) => lower.includes(k))) {
+      } else if (trimmed === "3" || trimmed === "opt_owner" || HANDOFF_KEYWORDS.some((k) => lower.includes(k))) {
         replyText = HANDOFF_TEXT;
         await notifyOwner(from, text, "Customer requested a call");
       } else {
@@ -115,18 +122,59 @@ exports.handler = async (event) => {
           replyText = await callAiFallback(trimmed);
         }
       }
+
+      await sendWhatsAppMessage(from, replyText);
+      return { statusCode: 200, body: "ok" };
     } catch (innerErr) {
       console.error("Reply generation failed:", innerErr);
-      replyText = "Thanks for reaching out! I'm having a little trouble right now — the owner will follow up with you shortly.";
+      await sendWhatsAppMessage(from, "Thanks for reaching out! I'm having a little trouble right now — the owner will follow up with you shortly.");
+      return { statusCode: 200, body: "ok" };
     }
-
-    await sendWhatsAppMessage(from, replyText);
-    return { statusCode: 200, body: "ok" };
   } catch (err) {
     console.error("Webhook error:", err);
     return { statusCode: 200, body: "error handled" };
   }
 };
+
+// Sends the initial menu as tappable buttons instead of a numbered text list —
+// customers tap instead of typing "1"/"2"/"3", which is more reliable and
+// looks more polished in a live demo.
+async function sendMenuButtons(to) {
+  const url = `https://graph.facebook.com/v19.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: "Hi! Welcome to The Secret Venue 👋\nHow can I help you today?" },
+      action: {
+        buttons: [
+          { type: "reply", reply: { id: "opt_availability", title: "Check availability" } },
+          { type: "reply", reply: { id: "opt_pricing", title: "Pricing & info" } },
+          { type: "reply", reply: { id: "opt_owner", title: "Talk to owner" } },
+        ],
+      },
+    },
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    console.error("Menu buttons send failed:", response.status, JSON.stringify(result));
+    // Fall back to a plain text menu so the customer isn't left with nothing.
+    await sendWhatsAppMessage(to, MENU_TEXT);
+  } else {
+    console.log("Menu buttons sent:", JSON.stringify(result));
+  }
+}
 
 // Sends the lead straight to the owner's own WhatsApp — no database needed for
 // a single-client setup. If OWNER_WHATSAPP_NUMBER isn't set, this just logs
@@ -143,11 +191,22 @@ async function notifyOwner(customerNumber, customerMessage, reason) {
 
 // ---------- Layer 1 helpers (no AI) ----------
 
+// Handles both plain text messages and button-tap replies. Button taps arrive
+// with type "interactive" and carry the button's id (e.g. "opt_availability")
+// in place of free text, so the rest of the routing logic can treat them the
+// same way it treats someone typing "1".
 function extractMessage(body) {
   try {
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!msg || msg.type !== "text") return null;
-    return { from: msg.from, text: msg.text.body };
+    if (!msg) return null;
+
+    if (msg.type === "text") {
+      return { from: msg.from, text: msg.text.body };
+    }
+    if (msg.type === "interactive" && msg.interactive?.type === "button_reply") {
+      return { from: msg.from, text: msg.interactive.button_reply.id };
+    }
+    return null;
   } catch {
     return null;
   }
